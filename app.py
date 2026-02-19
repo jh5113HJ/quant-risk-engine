@@ -5,14 +5,13 @@ import os
 from datetime import datetime
 
 # --- 1. 界面与样式配置 ---
-st.set_page_config(page_title="极速量化风控引擎 v8.0", layout="wide")
+st.set_page_config(page_title="极速量化风控终端 v8.1", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: #E0E0E0; }
     [data-testid="stMetricValue"] { color: #00FF41 !important; text-shadow: 0 0 5px #00FF41; }
-    /* 警告样式优化 */
-    .stAlert { background-color: #1E1E1E; border: 1px solid #FF4B4B; }
+    .stAlert { background-color: #1E1E1E; border: 1px solid #3B82F6; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -44,21 +43,21 @@ def save_log(new_data_dict):
 
 # --- 3. 主逻辑推演 ---
 def main():
-    st.title("⚡ 极速量化风控终端 (200x 限制版)")
+    st.title("⚡ 极速量化风控终端 (成本优化版)")
     
     with st.sidebar:
         st.header("⚙️ 账户基准")
-        balance = st.number_input("当前账户净值 (Principal)", min_value=0.1, value=10000.0, step=100.0)
-        # 核心改动：主动输入固定止损金额
-        fixed_risk = st.number_input("单笔固定止损金额 (Risk Amount)", min_value=0.0, value=200.0, step=10.0)
-        st.caption(f"当前风险占总仓位: {(fixed_risk/balance)*100:.2f}%")
+        balance = st.number_input("账户总资产 (USDT)", min_value=0.1, value=10000.0, step=100.0)
+        fixed_risk = st.number_input("单笔固定止损金额 (Risk)", min_value=0.0, value=200.0, step=10.0)
+        # 默认最大杠杆限制
+        max_lev_limit = 200.0
         st.divider()
-        st.markdown("### 杠杆天花板: **200.00x**")
+        st.info(f"💡 风险/本金比: {(fixed_risk/balance)*100:.2f}%")
 
     col1, col2 = st.columns([1, 1.2])
 
     with col1:
-        st.subheader("📊 交易头寸测算")
+        st.subheader("📊 仓位与成本测算")
         symbol = st.text_input("交易标的", "BTC/USDT")
         
         c1, c2, c3 = st.columns(3)
@@ -67,55 +66,63 @@ def main():
         take_profit = c3.number_input("止盈价", value=62000.0)
 
         if entry_price != stop_loss:
-            # 止损百分比
+            # 1. 计算核心指标
             sl_pct = abs(entry_price - stop_loss) / entry_price
-            # 盈亏比计算
-            tp_dist = abs(take_profit - entry_price)
             sl_dist = abs(entry_price - stop_loss)
+            tp_dist = abs(take_profit - entry_price)
             rr_ratio = tp_dist / sl_dist if sl_dist != 0 else 0
             
-            # 计算理论仓位
-            raw_pos_size = fixed_risk / sl_pct
-            raw_leverage = raw_pos_size / balance
+            # 2. 计算名义仓位 (Position Value)
+            # 公式：仓位 = 风险金额 / 止损百分比
+            theory_pos_size = fixed_risk / sl_pct
             
-            # --- 200x 强制风控逻辑 ---
-            final_leverage = raw_leverage
-            is_capped = False
-            if raw_leverage > 200:
-                final_leverage = 200.0
-                final_pos_size = balance * 200
-                is_capped = True
+            # 3. 计算杠杆与成本 (根据 200x 限制)
+            theory_leverage = theory_pos_size / balance
+            
+            if theory_leverage > max_lev_limit:
+                final_leverage = max_lev_limit
+                final_pos_size = balance * max_lev_limit
+                st.warning(f"⚠️ 触发 200x 强限！名义仓位已缩减至 {final_pos_size:.2f}")
             else:
-                final_pos_size = raw_pos_size
+                final_leverage = theory_leverage
+                final_pos_size = theory_pos_size
 
-            # 结果显示
-            m1, m2, m3 = st.columns(3)
-            m1.metric("建议仓位", f"{final_pos_size:.2f}")
-            m2.metric("执行杠杆", f"{final_leverage:.2f}x")
-            m3.metric("盈亏比 (RR)", f"{rr_ratio:.2f}")
+            # 4. 计算投入成本 (Margin/Cost)
+            # 公式：成本 = 名义仓位 / 杠杆
+            # 在全逐仓模式下，这笔单子在交易所显示的“成本”
+            actual_cost = final_pos_size / final_leverage if final_leverage > 0 else 0
 
-            if is_capped:
-                st.warning(f"⚠️ 警告：所需杠杆 ({raw_leverage:.2f}x) 超过系统上限！已强制锁定为 200x。实际亏损将小于设定金额。")
+            # 5. 结果矩阵
+            st.divider()
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric("名义价值 (Position)", f"{final_pos_size:.2f} U")
+                st.metric("投入成本 (Cost/Margin)", f"{actual_cost:.2f} U")
+            with m2:
+                st.metric("执行杠杆 (Leverage)", f"{final_leverage:.2f} x")
+                st.metric("盈亏比 (RR)", f"{rr_ratio:.2f}")
 
-            if st.button("🚀 确认交易并同步云端"):
+            st.caption(f"注：投入 {actual_cost:.2f} USDT 开启 {final_leverage:.2f}x 杠杆，若止损将亏损约 {fixed_risk:.2f} USDT。")
+
+            if st.button("🚀 确认记录并同步云端"):
                 log_entry = {
                     "时间": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "标的": symbol,
-                    "账户余额": balance,
-                    "固定止损额": fixed_risk,
+                    "固定风险额": fixed_risk,
                     "入场价": entry_price,
                     "止损价": stop_loss,
                     "止盈价": take_profit,
-                    "盈亏比": round(rr_ratio, 2),
+                    "投入成本(Margin)": round(actual_cost, 2),
                     "执行杠杆": round(final_leverage, 2),
-                    "最终仓位": round(final_pos_size, 2)
+                    "名义价值": round(final_pos_size, 2),
+                    "盈亏比": round(rr_ratio, 2)
                 }
                 if save_log(log_entry):
-                    st.success("数据已穿透至 Google Sheets")
+                    st.success("数据已成功上云")
                     st.balloons()
 
     with col2:
-        st.subheader("📜 历史风控档案")
+        st.subheader("📜 历史风控记录")
         logs = load_logs()
         if not logs.empty:
             st.dataframe(logs.sort_index(ascending=False), use_container_width=True)
