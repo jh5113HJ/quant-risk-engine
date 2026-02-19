@@ -28,19 +28,39 @@ class ContractSpec:
 DEFAULT_SPEC = ContractSpec(symbol="BTCUSDT", min_qty=0.0001, price_tick=0.1, max_leverage=200, liq_fee_rate=0.0004)
 
 # --- 3. 日志读取保存逻辑 ---
-LOG_FILE = 'trading_log.csv'
-
-def save_log(data):
-    df = pd.DataFrame([data])
-    if not os.path.isfile(LOG_FILE):
-        df.to_csv(LOG_FILE, index=False, encoding='utf-8-sig')
-    else:
-        df.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
-
 def load_logs():
-    if os.path.isfile(LOG_FILE):
-        return pd.read_csv(LOG_FILE)
-    return pd.DataFrame()
+    """从 Google Sheets 拉取全局数据"""
+    try:
+        # 建立连接
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        # 读取数据 (默认读取工作表1)
+        df = conn.read()
+        
+        # 清洗空行 (Google Sheets API 有时会返回带有 NaN 的空行)
+        df = df.dropna(how="all")
+        return df
+    except Exception as e:
+        st.error(f"数据库连接异常: {e}")
+        return pd.DataFrame()
+
+def save_log(new_data_dict):
+    """将单条新日志追加到 Google Sheets"""
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    
+    # 1. 拉取历史数据
+    existing_data = load_logs()
+    
+    # 2. 将新数据转换为 DataFrame
+    new_df = pd.DataFrame([new_data_dict])
+    
+    # 3. 拼接历史与新数据
+    if existing_data.empty:
+        updated_data = new_df
+    else:
+        updated_data = pd.concat([existing_data, new_df], ignore_index=True)
+    
+    # 4. 全量覆写回 Google Sheets (官方推荐的安全更新方式)
+    conn.update(data=updated_data)
 
 # --- 4. 前端 UI 与 交互主逻辑 ---
 def main():
