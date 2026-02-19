@@ -2,113 +2,128 @@ import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 import os
-import math
 from datetime import datetime
 
-# --- 1. 配置界面 ---
-st.set_page_config(page_title="量化交易风控引擎", layout="wide")
+# --- 1. 工业级界面配置 (保留原有暗黑风格) ---
+st.set_page_config(page_title="量化风控引擎 v7.5", layout="wide")
 
-# 注入暗黑硬核 CSS
 st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: #E0E0E0; }
-    [data-testid="stMetricValue"] { color: #00FF41 !important; text-shadow: 0 0 5px #00FF41; }
+    [data-testid="stMetricValue"] { 
+        font-size: 1.8rem !important;
+        color: #00FF41 !important; 
+        text-shadow: 0 0 5px #00FF41; 
+    }
+    .stMetric label { color: #A0AEC0 !important; font-weight: bold; }
+    header, #MainMenu, footer { visibility: hidden; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 数据库核心逻辑 (已修复 UnsupportedOperationError) ---
+# --- 2. 数据库连接逻辑 (保留原有功能并修复报错) ---
 
-def get_conn():
-    """建立并返回数据库连接"""
+def get_db_connection():
+    """建立数据库连接"""
     return st.connection("gsheets", type=GSheetsConnection)
 
-def load_logs():
-    """从云端表格读取数据"""
+def load_data():
+    """读取云端历史日志"""
     try:
-        conn = get_conn()
-        # 显式传递 URL 确保连接稳定
+        conn = get_db_connection()
+        # 显式从 secrets 获取 URL 解决 UnsupportedOperationError
         target_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
-        df = conn.read(spreadsheet=target_url, ttl=0) # ttl=0 确保实时读取不使用缓存
+        df = conn.read(spreadsheet=target_url, ttl=0)
         return df.dropna(how="all") if df is not None else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
-def save_log(new_data_dict):
-    """写入云端表格 (强力注入模式)"""
+def save_to_db(new_record):
+    """安全写入单条记录"""
     try:
-        conn = get_conn()
+        conn = get_db_connection()
         target_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
         
-        # 1. 获取现有数据
-        existing_data = load_logs()
+        # 1. 预读取现有数据
+        history = load_data()
         
-        # 2. 合并新数据
-        new_df = pd.DataFrame([new_data_dict])
-        if existing_data.empty:
-            updated_data = new_df
-        else:
-            updated_data = pd.concat([existing_data, new_df], ignore_index=True)
+        # 2. 合并新记录
+        new_row = pd.DataFrame([new_record])
+        updated_df = pd.concat([history, new_row], ignore_index=True) if not history.empty else new_row
         
-        # 3. 核心修复：显式指定 spreadsheet 参数进行覆写
-        conn.update(
-            spreadsheet=target_url, 
-            data=updated_data
-        )
+        # 3. 显式指定 spreadsheet 参数进行覆写 (物理修复关键点)
+        conn.update(spreadsheet=target_url, data=updated_df)
         return True
     except Exception as e:
-        st.error(f"写入失败详情: {e}")
+        st.error(f"数据库写入拦截: {e}")
         return False
 
-# --- 3. 交互界面逻辑 ---
+# --- 3. 核心风控交互界面 (保留原有逻辑) ---
+
 def main():
-    st.title("🛡️ A-Share 量化交易风控引擎 v7.0")
+    st.title("🛡️ 量化风控交易终端 (Pro Cloud)")
     
+    # 侧边栏：资产配置
     with st.sidebar:
-        st.header("账户参数")
-        balance = st.number_input("当前账户总资产 (USDT/CNY)", min_value=1.0, value=10000.0)
-        risk_pct = st.slider("单笔最高亏损风险 (%)", 0.5, 5.0, 2.0)
-        max_risk_money = balance * (risk_pct / 100)
-        st.info(f"💡 允许最大亏损: {max_risk_money:.2f}")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("开仓测算")
-        symbol = st.text_input("交易标的 (如 BTC/SOL)", "BTC")
-        entry_price = st.number_input("拟入场价格", value=60000.0)
-        stop_loss = st.number_input("止损触发价格", value=59000.0)
+        st.header("账户全局参数")
+        balance = st.number_input("账户总资产 (Total Equity)", min_value=0.0, value=10000.0, step=100.0)
+        risk_pct = st.slider("单笔风险暴露 (%)", 0.5, 5.0, 2.0, help="每笔交易亏损占总资产的最大百分比")
         
-        if entry_price != stop_loss:
-            loss_dist = abs(entry_price - stop_loss)
-            loss_ratio = (loss_dist / entry_price) * 100
-            # 计算仓位：金额 = 允许亏损 / 止损百分比
-            pos_size = max_risk_money / (loss_ratio / 100)
-            leverage = pos_size / balance
-            
-            st.metric("推荐仓位金额", f"{pos_size:.2f}")
-            st.metric("推荐理论杠杆", f"{leverage:.2f}x")
+        # 第一性原理公式展示
+        max_loss = balance * (risk_pct / 100)
+        st.info(f"💡 允许最大亏损金额: {max_loss:.2f}")
 
-            if st.button("⚡ 执行风控推导并记录"):
+    # 主界面：两栏布局
+    left_col, right_col = st.columns([1, 1.2])
+
+    with left_col:
+        st.subheader("📡 实时开仓推演")
+        symbol = st.text_input("交易标的", value="BTC/USDT")
+        
+        # 开仓参数输入
+        price_col1, price_col2 = st.columns(2)
+        with price_col1:
+            entry = st.number_input("入场价", value=60000.0)
+        with price_col2:
+            stop_loss = st.number_input("止损价", value=59000.0)
+
+        # 核心逻辑计算
+        if entry != stop_loss:
+            loss_dist = abs(entry - stop_loss)
+            loss_pct = (loss_dist / entry)
+            
+            # 计算推荐仓位 (不包含杠杆前的名义价值)
+            pos_size = max_loss / loss_pct
+            # 计算所需杠杆
+            theory_lev = pos_size / balance
+            
+            # UI 指标展示 (保留原有美化风格)
+            m1, m2 = st.columns(2)
+            m1.metric("建议仓位规模", f"{pos_size:.2f}")
+            m2.metric("理论参考杠杆", f"{theory_lev:.2f}x")
+
+            if st.button("⚡ 执行风控记录 (Sync to Cloud)", use_container_width=True):
                 log_data = {
                     "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "标的": symbol,
-                    "账户总额": balance,
-                    "风险比例%": risk_pct,
-                    "入场价": entry_price,
+                    "总资产": balance,
+                    "风险%": risk_pct,
+                    "入场价": entry,
                     "止损价": stop_loss,
-                    "建议仓位": round(pos_size, 2),
-                    "建议杠杆": round(leverage, 2)
+                    "仓位": round(pos_size, 2),
+                    "杠杆": round(theory_lev, 2)
                 }
-                if save_log(log_data):
-                    st.success("✅ 交易记录已实时同步至 Google Sheets 数据库")
+                if save_to_db(log_data):
+                    st.success("数据已穿透容器，成功写入云端数据库")
                     st.balloons()
 
-    with col2:
-        st.subheader("历史风险日志 (云端实时)")
-        history_df = load_logs()
-        if not history_df.empty:
-            st.dataframe(history_df.sort_index(ascending=False), use_container_width=True)
+    with right_col:
+        st.subheader("📜 历史交易审计 (Google Sheets)")
+        history_data = load_data()
+        if not history_data.empty:
+            # 倒序排列，最新的在上面
+            st.dataframe(history_data.iloc[::-1], use_container_width=True, height=450)
         else:
-            st.warning("目前云端数据库尚无记录")
+            st.warning("数据库暂无历史记录，等待首次同步...")
 
 if __name__ == "__main__":
     main()
