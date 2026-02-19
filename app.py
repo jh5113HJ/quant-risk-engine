@@ -239,8 +239,8 @@ def save_log(new_data_dict):
 
 # -------------------- 5. 主界面 --------------------
 def main():
-    st.title("🛡️ 交易杠杆与风控推导系统 v7.0")
-    st.markdown("基于 **固定亏损金额** 全自动反推安全杠杆、最优仓位，并计算强平价格。")
+    st.title("🛡️ 交易杠杆与风控推导系统 v7.1")
+    st.markdown("基于 **固定亏损金额** 自动反推或手动设置杠杆，实时评估风险。")
 
     col1, col2 = st.columns([1, 2])
 
@@ -256,6 +256,15 @@ def main():
         entry_price = st.number_input("开仓价格 (Entry)", min_value=0.00001, value=60000.0, format="%.5f")
         stop_loss = st.number_input("止损价格 (Stop Loss)", min_value=0.00001, value=59500.0, format="%.5f")
         take_profit = st.number_input("止盈价格 (Take Profit) - 可选", min_value=0.00001, value=62000.0, format="%.5f")
+
+        st.divider()
+        # 新增：杠杆选择模式
+        leverage_mode = st.radio("杠杆选择模式", ["自动推荐杠杆", "手动设置杠杆"], index=0)
+
+        if leverage_mode == "手动设置杠杆":
+            user_leverage = st.number_input("请输入杠杆倍数 (1-200)", min_value=1, max_value=200, value=10, step=1)
+        else:
+            user_leverage = None  # 自动模式时此变量无用
 
         calculate_btn = st.button("⚡ 执行风控推导", type="primary", use_container_width=True)
 
@@ -279,31 +288,56 @@ def main():
                     st.error("逻辑错误：空单止盈必须低于开仓价！")
                     st.stop()
 
-                # 调用核心计算
-                result = CrossMarginPosition.calculate_from_risk(
-                    entry_price=entry_price,
-                    stop_loss=stop_loss,
-                    risk_amount=risk_amount,
-                    balance=balance,
-                    contract_spec=DEFAULT_SPEC,
-                    take_profit=take_profit if take_profit != 0 else None
-                )
+                price_diff = abs(entry_price - stop_loss)
+                raw_qty = risk_amount / price_diff
+                qty = DEFAULT_SPEC.round_qty(raw_qty)
+                if qty <= 0:
+                    st.error("计算出的数量过小，请增大风险金额或更换合约")
+                    st.stop()
+                qty = qty if is_long else -qty
+                abs_qty = abs(qty)
+                notional = abs_qty * entry_price
 
-                # 提取结果
-                qty = result['quantity']
-                leverage = result['leverage']
-                margin = result['margin']
-                notional = result['notional']
-                profit = result['profit']
-                rr = result['rr']
-                liq_price = result['liquidation_price']
+                # 根据杠杆模式计算
+                if leverage_mode == "自动推荐杠杆":
+                    # 自动模式：计算最小可行杠杆
+                    if balance <= 0:
+                        raise ValueError("余额必须为正")
+                    min_leverage_needed = math.ceil(notional / balance)
+                    if min_leverage_needed > DEFAULT_SPEC.max_leverage:
+                        st.error(f"所需最低杠杆 {min_leverage_needed}x 超过最大允许 {DEFAULT_SPEC.max_leverage}x，请减少风险金额或增加余额")
+                        st.stop()
+                    leverage = min_leverage_needed
+                    margin = notional / leverage
+                    # 显示提示
+                    st.info(f"自动推荐杠杆: {leverage}x (基于保证金需求)")
+                else:
+                    # 手动模式：使用用户输入的杠杆
+                    leverage = user_leverage
+                    margin = notional / leverage
+                    if margin > balance:
+                        st.error(f"保证金不足！需占用本金 ${margin:.2f}，可用余额仅为 ${balance}。请降低杠杆或增加余额。")
+                        st.stop()
 
-                # 显示
+                # 创建临时仓位计算强平价格
+                temp_pos = CrossMarginPosition(symbol_input, DEFAULT_SPEC, balance)
+                temp_pos.open_position(entry_price, qty, leverage)
+                liq_price = temp_pos.get_liquidation_price()
+
+                # 计算止盈相关
+                profit = None
+                rr = None
+                if take_profit is not None and take_profit != 0:
+                    tp_diff = abs(take_profit - entry_price)
+                    profit = abs_qty * tp_diff
+                    rr = profit / risk_amount if risk_amount != 0 else 0
+
+                # 显示结果
                 st.markdown(f"### {symbol_input} | {direction}")
 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("建议下单数量 (币)", f"{qty:.4f}")
-                m2.metric("系统分配杠杆", f"{leverage} x")
+                m2.metric("使用杠杆", f"{leverage} x")
                 m3.metric("实际占用本金", f"${margin:.2f}")
 
                 m4, m5, m6 = st.columns(3)
@@ -344,7 +378,8 @@ def main():
                     'risk': -risk_amount,
                     'profit': round(profit, 2) if profit else None,
                     'rr': round(rr, 2) if rr else None,
-                    'liq_price': round(liq_price, 2) if liq_price else None
+                    'liq_price': round(liq_price, 2) if liq_price else None,
+                    'leverage_mode': leverage_mode
                 }
                 save_log(log_data)
                 st.info("📝 交易记录已自动写入底层日志库。")
@@ -359,7 +394,3 @@ def main():
         st.dataframe(logs_df.tail(10), use_container_width=True)
     else:
         st.write("暂无历史交易数据。")
-
-
-if __name__ == "__main__":
-    main()
