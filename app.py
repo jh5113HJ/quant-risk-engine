@@ -4,181 +4,111 @@ from streamlit_gsheets import GSheetsConnection
 import os
 import math
 from datetime import datetime
-from dataclasses import dataclass
 
-# --- 1. 页面与全栈配置 ---
-st.set_page_config(page_title="量化交易风控引擎", page_icon="📈", layout="wide")
+# --- 1. 配置界面 ---
+st.set_page_config(page_title="量化交易风控引擎", layout="wide")
 
-# --- 2. 合约规范类 (复用核心底层) ---
-@dataclass
-class ContractSpec:
-    symbol: str
-    min_qty: float
-    price_tick: float
-    max_leverage: int
-    liq_fee_rate: float
+# 注入暗黑硬核 CSS
+st.markdown("""
+    <style>
+    .stApp { background-color: #0E1117; color: #E0E0E0; }
+    [data-testid="stMetricValue"] { color: #00FF41 !important; text-shadow: 0 0 5px #00FF41; }
+    </style>
+    """, unsafe_allow_html=True)
 
-    def round_qty(self, raw_qty):
-        if self.min_qty == 0: return raw_qty
-        decimals = 0
-        if self.min_qty < 1:
-            decimals = len(str(self.min_qty).split('.')[1])
-        factor = 10 ** decimals
-        return math.floor(raw_qty * factor) / factor
+# --- 2. 数据库核心逻辑 (已修复 UnsupportedOperationError) ---
 
-DEFAULT_SPEC = ContractSpec(symbol="BTCUSDT", min_qty=0.0001, price_tick=0.1, max_leverage=200, liq_fee_rate=0.0004)
+def get_conn():
+    """建立并返回数据库连接"""
+    return st.connection("gsheets", type=GSheetsConnection)
 
-# --- 3. 日志读取保存逻辑 ---
 def load_logs():
-    """从 Google Sheets 拉取全局数据"""
+    """从云端表格读取数据"""
     try:
-        # 建立连接
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        # 读取数据 (默认读取工作表1)
-        df = conn.read()
-        
-        # 清洗空行 (Google Sheets API 有时会返回带有 NaN 的空行)
-        df = df.dropna(how="all")
-        return df
-    except Exception as e:
-        st.error(f"数据库连接异常: {e}")
+        conn = get_conn()
+        # 显式传递 URL 确保连接稳定
+        target_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+        df = conn.read(spreadsheet=target_url, ttl=0) # ttl=0 确保实时读取不使用缓存
+        return df.dropna(how="all") if df is not None else pd.DataFrame()
+    except Exception:
         return pd.DataFrame()
 
 def save_log(new_data_dict):
-    """将单条新日志追加到 Google Sheets"""
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    
-    # 1. 拉取历史数据
-    existing_data = load_logs()
-    
-    # 2. 将新数据转换为 DataFrame
-    new_df = pd.DataFrame([new_data_dict])
-    
-    # 3. 拼接历史与新数据
-    if existing_data.empty:
-        updated_data = new_df
-    else:
-        updated_data = pd.concat([existing_data, new_df], ignore_index=True)
-    
-    # 4. 全量覆写回 Google Sheets (官方推荐的安全更新方式)
-    conn.update(data=updated_data)
+    """写入云端表格 (强力注入模式)"""
+    try:
+        conn = get_conn()
+        target_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+        
+        # 1. 获取现有数据
+        existing_data = load_logs()
+        
+        # 2. 合并新数据
+        new_df = pd.DataFrame([new_data_dict])
+        if existing_data.empty:
+            updated_data = new_df
+        else:
+            updated_data = pd.concat([existing_data, new_df], ignore_index=True)
+        
+        # 3. 核心修复：显式指定 spreadsheet 参数进行覆写
+        conn.update(
+            spreadsheet=target_url, 
+            data=updated_data
+        )
+        return True
+    except Exception as e:
+        st.error(f"写入失败详情: {e}")
+        return False
 
-# --- 4. 前端 UI 与 交互主逻辑 ---
+# --- 3. 交互界面逻辑 ---
 def main():
-    st.title("🛡️ 交易杠杆与风控推导系统 v6.0")
-    st.markdown("基于 **固定亏损金额** 全自动反推安全杠杆与最优仓位。")
+    st.title("🛡️ A-Share 量化交易风控引擎 v7.0")
+    
+    with st.sidebar:
+        st.header("账户参数")
+        balance = st.number_input("当前账户总资产 (USDT/CNY)", min_value=1.0, value=10000.0)
+        risk_pct = st.slider("单笔最高亏损风险 (%)", 0.5, 5.0, 2.0)
+        max_risk_money = balance * (risk_pct / 100)
+        st.info(f"💡 允许最大亏损: {max_risk_money:.2f}")
 
-    # 布局：左侧输入参数，右侧输出结果
-    col1, col2 = st.columns([1, 2])
-
+    col1, col2 = st.columns(2)
     with col1:
-        st.subheader("1. 交易参数设置")
+        st.subheader("开仓测算")
+        symbol = st.text_input("交易标的 (如 BTC/SOL)", "BTC")
+        entry_price = st.number_input("拟入场价格", value=60000.0)
+        stop_loss = st.number_input("止损触发价格", value=59000.0)
         
-        raw_symbol = st.text_input("交易币种 (默认自动追加 USDT)", value="BTC").strip().upper()
-        symbol_input = raw_symbol if raw_symbol.endswith("USDT") else f"{raw_symbol}USDT"
-        
-        balance = st.number_input("账户总资金 (USDT)", min_value=1.0, value=1000.0, step=100.0)
-        risk_amount = st.number_input("固定止损金额 (Risk $)", min_value=1.0, value=50.0, step=10.0)
-        
-        st.divider()
-        entry_price = st.number_input("开仓价格 (Entry)", min_value=0.00001, value=60000.0, format="%.5f")
-        stop_loss = st.number_input("止损价格 (Stop Loss)", min_value=0.00001, value=59500.0, format="%.5f")
-        take_profit = st.number_input("止盈价格 (Take Profit)", min_value=0.00001, value=62000.0, format="%.5f")
-        
-        calculate_btn = st.button("⚡ 执行风控推导", type="primary", use_container_width=True)
+        if entry_price != stop_loss:
+            loss_dist = abs(entry_price - stop_loss)
+            loss_ratio = (loss_dist / entry_price) * 100
+            # 计算仓位：金额 = 允许亏损 / 止损百分比
+            pos_size = max_risk_money / (loss_ratio / 100)
+            leverage = pos_size / balance
+            
+            st.metric("推荐仓位金额", f"{pos_size:.2f}")
+            st.metric("推荐理论杠杆", f"{leverage:.2f}x")
+
+            if st.button("⚡ 执行风控推导并记录"):
+                log_data = {
+                    "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "标的": symbol,
+                    "账户总额": balance,
+                    "风险比例%": risk_pct,
+                    "入场价": entry_price,
+                    "止损价": stop_loss,
+                    "建议仓位": round(pos_size, 2),
+                    "建议杠杆": round(leverage, 2)
+                }
+                if save_log(log_data):
+                    st.success("✅ 交易记录已实时同步至 Google Sheets 数据库")
+                    st.balloons()
 
     with col2:
-        st.subheader("2. 智能风控执行面板")
-        
-        if calculate_btn:
-            # --- 核心逻辑防呆校验 ---
-            if entry_price == stop_loss:
-                st.error("止损价不能等于开仓价！")
-                return
-                
-            is_long = entry_price > stop_loss
-            direction = "做多 (Long)" if is_long else "做空 (Short)"
-            
-            if is_long and take_profit <= entry_price:
-                st.error("逻辑错误：多单止盈必须高于开仓价！")
-                return
-            if not is_long and take_profit >= entry_price:
-                st.error("逻辑错误：空单止盈必须低于开仓价！")
-                return
-
-            # --- 核心数学计算 ---
-            price_diff = abs(entry_price - stop_loss)
-            tp_diff = abs(take_profit - entry_price)
-            
-            raw_qty = risk_amount / price_diff
-            final_qty = DEFAULT_SPEC.round_qty(raw_qty)
-            
-            if final_qty <= 0:
-                st.error(f"持仓量过小已被截断为 0。请增加风险金额或更换面值更小的合约。")
-                return
-
-            notional_value = final_qty * entry_price
-            target_margin = risk_amount * 1.05  # 5% 缓冲
-            raw_leverage = notional_value / target_margin
-            
-            final_leverage = min(int(raw_leverage), DEFAULT_SPEC.max_leverage)
-            final_leverage = max(final_leverage, 1) # 至少 1x
-            
-            actual_margin = notional_value / final_leverage
-            projected_profit = final_qty * tp_diff
-            rr_ratio = projected_profit / risk_amount
-            est_liq_fee = notional_value * DEFAULT_SPEC.liq_fee_rate
-
-            liquidation_risk = (actual_margin - est_liq_fee) <= risk_amount
-
-            # --- 结果可视化呈现 ---
-            st.markdown(f"### {symbol_input} | {direction}")
-            
-            # 使用 Metric 组件展示核心指标
-            m1, m2, m3 = st.columns(3)
-            m1.metric("建议下单数量 (币)", f"{final_qty:.4f}")
-            m2.metric("系统分配杠杆", f"{final_leverage} x")
-            m3.metric("实际占用本金", f"${actual_margin:.2f}")
-
-            m4, m5, m6 = st.columns(3)
-            m4.metric("预期止盈利润", f"+${projected_profit:.2f}")
-            m5.metric("盈亏比 (R:R)", f"{rr_ratio:.2f}")
-            m6.metric("预估强平手续费", f"${est_liq_fee:.2f}")
-
-            # 风险评估与拦截
-            if liquidation_risk:
-                st.error("⚠️ **高危警告**：止损空间过大导致杠杆被压缩，当前保证金可能不足以覆盖强平滑点，有提前爆仓风险。")
-            elif actual_margin > balance:
-                st.error(f"❌ **资金不足**：该单需要占用本金 ${actual_margin:.2f}，但可用余额仅为 ${balance}。")
-            else:
-                st.success("✅ **风控通过**：仓位处于安全范围，未触发强平拦截。")
-                
-                # 记录日志
-                log_data = {
-                    'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'symbol': symbol_input,
-                    'direction': direction,
-                    'leverage': final_leverage,
-                    'size': final_qty,
-                    'balance': balance,
-                    'entry': entry_price,
-                    'sl': stop_loss,
-                    'tp': take_profit,
-                    'risk': -risk_amount,
-                    'profit': round(projected_profit, 2),
-                    'rr': round(rr_ratio, 2)
-                }
-                save_log(log_data)
-                st.info("📝 交易记录已自动写入底层日志库。")
-
-    st.divider()
-    st.subheader("📊 历史交易日志复盘")
-    logs_df = load_logs()
-    if not logs_df.empty:
-        # 在网页端以可交互的数据表格展示日志
-        st.dataframe(logs_df.tail(10), use_container_width=True)
-    else:
-        st.write("暂无历史交易数据。")
+        st.subheader("历史风险日志 (云端实时)")
+        history_df = load_logs()
+        if not history_df.empty:
+            st.dataframe(history_df.sort_index(ascending=False), use_container_width=True)
+        else:
+            st.warning("目前云端数据库尚无记录")
 
 if __name__ == "__main__":
     main()
